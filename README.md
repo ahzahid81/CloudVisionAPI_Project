@@ -8,6 +8,9 @@
 | Abdul Hasib Zahid | 443058333 |
 | MOHAMMAD TAKIUDDIN | 441037573 |
 
+**Live app:** https://platformproject.streamlit.app  
+**Repository:** https://github.com/ahzahid81/CloudVisionAPI_Project
+
 A simple, deployment-ready Streamlit app that sends an uploaded image to the **Google
 Cloud Vision API** and presents labels, localized objects with bounding boxes, and OCR
 text with confidence scores.
@@ -26,7 +29,7 @@ text with confidence scores.
 ## Project structure
 
 ```
-Platform_Project/
+CloudVisionAPI_Project/
 ├── app.py                        # Streamlit UI and page flow
 ├── vision_service.py             # Google Cloud Vision client and response parsing
 ├── image_utils.py                # Draws object bounding boxes with Pillow
@@ -45,7 +48,7 @@ Platform_Project/
 Use Python 3.13 (Python 3.10 or newer works). Double-click `run_app.cmd`, or run:
 
 ```powershell
-cd E:\Platform_Project
+cd path\to\CloudVisionAPI_Project
 .\run_app.cmd
 ```
 
@@ -68,7 +71,8 @@ streamlit run app.py
 3. Link an active **billing account** under **Billing**. Vision requires billing even
    within the free tier.
 4. Create a **service account** under **IAM & Admin → Service Accounts** and grant it the
-   **Cloud Vision API User** role.
+   **Cloud Vision API User** role. The service account must belong to the same project
+   where the Vision API and billing are enabled.
 5. Create and download a **JSON key** for the service account.
 
 ## Configuration
@@ -94,7 +98,8 @@ app_password = "choose-a-strong-password"
 
 1. Push this folder to a GitHub repository. Never commit `.streamlit/secrets.toml`.
 2. Sign in at [share.streamlit.io](https://share.streamlit.io/) and choose **Create app**.
-3. Select the repository and branch, then set the main file to `app.py`.
+3. Select the repository and branch. Set **Main file path** to `app.py` — the deploy form
+   prefills `streamlit_app.py`, which does not exist in this repository.
 4. Open **Advanced settings → Secrets** and paste:
 
    ```toml
@@ -109,8 +114,9 @@ app_password = "choose-a-strong-password"
    ```
 
    Copy every field from your JSON key. Remove the `app_password` line if the app should
-   be public.
+   be public. Never add credentials to `README.md`, source files, or the Git repository.
 5. Select Python 3.13 if prompted, then click **Deploy**.
+6. Verify the deployed app at https://platformproject.streamlit.app.
 
 Make sure the Cloud Vision API and billing are enabled for the project before deploying.
 
@@ -123,6 +129,7 @@ Make sure the Cloud Vision API and billing are enabled for the project before de
 - [ ] Secrets pasted into **Advanced settings → Secrets**.
 - [ ] `app_password` set for a public app.
 - [ ] Python 3.13 selected.
+- [ ] Live app reachable at https://platformproject.streamlit.app.
 - [ ] One test image analyzed successfully after deployment.
 
 ## How it works
@@ -141,6 +148,7 @@ again. A new image triggers one new analysis.
 
 | Problem | Fix |
 | --- | --- |
+| "This file does not exist" during deployment | Set **Main file path** to `app.py`, not `streamlit_app.py`. |
 | "This application is not configured..." | Add `[gcp_service_account]` to Streamlit secrets and restart the app. |
 | Billing error | Link an active billing account to the Google Cloud project. |
 | `PermissionDenied` / `403` | Grant the service account the **Cloud Vision API User** role. |
