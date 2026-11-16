@@ -1,395 +1,189 @@
-"""Image Recognition App powered by the Google Cloud Vision API."""
-
-from __future__ import annotations
-
+import csv
 import hashlib
-import hmac
 import io
 import json
-import logging
-from pathlib import Path
 
-import pandas as pd
 import streamlit as st
-from google.api_core.exceptions import GoogleAPIError
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw
+from gemini_service import GeminiError, MODEL, analyze_image, get_api_key
+from vision_service import prepare_image
 
-from image_utils import annotate_objects
-from vision_service import VisionClientError, analyze_image, build_client
+st.set_page_config(page_title='Vision Studio', page_icon='◉', layout='wide')
+st.markdown('''<style>
+.block-container {max-width:1050px;padding-top:3rem}
+h1 {letter-spacing:-.045em}
+.st-key-page_intro {
+    background:linear-gradient(115deg,#181510 25%,#32261a 73%,#59411f);
+    border:1px solid #745731;border-radius:20px;
+    padding:clamp(1rem,3vw,1.65rem);margin-bottom:.5rem
+}
+.st-key-page_intro h1 {color:#f4cb7e}
+.st-key-image_panel,.st-key-action_panel {
+    background:#1b1814;border-color:#594628!important;border-radius:16px!important
+}
+[data-testid="stMetric"] {
+    background:#211b14;border:1px solid #594628;border-radius:14px;padding:1rem
+}
+[data-testid="stImage"] img {border-radius:12px}
+[data-testid="stFileUploaderDropzone"] {border:1px dashed #b08b49;border-radius:12px}
+button[kind="primary"] {background:#e8ba63;color:#21170a}
+button[kind="primary"]:hover {background:#f6cf84;color:#21170a}
+button:focus-visible,a:focus-visible {
+    outline:3px solid #f4cb7e!important;outline-offset:3px
+}
+</style>''', unsafe_allow_html=True)
 
-MAX_RESULTS = 20
-MAX_UPLOAD_MB = 20
-TEAM = (
-    ("Asim bin Adel Al-Mutrafi", "441006293"),
-    ("Abdul Hasib Zahid", "443058333"),
-    ("MOHAMMAD TAKIUDDIN", "441037573"),
+confidence_slider = st.components.v2.component(
+    'confidence_slider',
+    html="""
+    <div class="confidence" dir="ltr" translate="no">
+      <div class="row"><label for="confidence">Minimum confidence</label>
+        <output for="confidence">50%</output></div>
+      <input id="confidence" type="range" min="0" max="100" step="1" value="50"
+             aria-describedby="confidence-help">
+      <div class="row endpoints" aria-hidden="true"><span>0%</span><span>100%</span></div>
+      <small id="confidence-help">Filters labels and objects by Gemini's estimated confidence.</small>
+    </div>
+    """,
+    css="""
+    .confidence { direction: ltr; color: var(--st-text-color, #f7f0e3); }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+    label { font-size: .9rem; font-weight: 600; }
+    output { color: #f4cb7e; background: #423119; border-radius: 8px;
+             padding: .15rem .5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    input { direction: ltr; appearance: none; box-sizing: border-box; width: 100%;
+            height: 28px; margin: .25rem 0 0; cursor: pointer;
+            background: linear-gradient(to right, #e8ba63 var(--stop, 50%),
+                        #695b46 var(--stop, 50%)) center / 100% 6px no-repeat; }
+    input::-webkit-slider-thumb { appearance: none; width: 18px; height: 18px;
+        border-radius: 50%; border: 2px solid #21170a; background: #e8ba63;
+        box-shadow: 0 0 0 1px #e8ba63; }
+    input::-moz-range-thumb { box-sizing: border-box; width: 18px; height: 18px;
+        border-radius: 50%; border: 2px solid #21170a; background: #e8ba63;
+        box-shadow: 0 0 0 1px #e8ba63; }
+    input:focus-visible { outline: 2px solid #f4cb7e; outline-offset: 3px; border-radius: 6px; }
+    .endpoints, small { color: #d8c6a9; font-size: .8rem; }
+    small { display: block; margin-top: .6rem; }
+    """,
+    js="""
+    export default function ({ parentElement, data, setStateValue }) {
+        const slider = parentElement.querySelector('input');
+        const output = parentElement.querySelector('output');
+        function renderValue() {
+            const value = slider.valueAsNumber;
+            output.value = value + '%';
+            slider.setAttribute('aria-valuetext', output.value);
+            slider.style.setProperty('--stop', 'calc(' + value + '% + ' + (9 - value * .18) + 'px)');
+        }
+        slider.value = data.value;
+        renderValue();
+        slider.oninput = renderValue;
+        slider.onchange = () => setStateValue('value', slider.valueAsNumber);
+    }
+    """,
 )
 
-logger = logging.getLogger(__name__)
+with st.container(key='page_intro'):
+    st.title('Vision Studio')
+    st.write('Find objects and extract text from an image.')
 
-st.set_page_config(
-    page_title="Image Recognition",
-    page_icon=":material/image_search:",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
+uploaded = st.file_uploader('1. Upload an image', type=['png', 'jpg', 'jpeg', 'webp'])
+if uploaded is None:
+    st.session_state.pop('result', None)
+    st.session_state.pop('result_key', None)
+    st.info('Choose an image to preview it and start analysis.')
+    st.stop()
+data = uploaded.getvalue()
 
-STYLES = """
-<style>
-    .block-container {
-        max-width: 860px;
-        padding-bottom: 3rem;
-        padding-top: 2rem;
-    }
-    .hero {
-        background: linear-gradient(135deg, #0b1f3a 0%, #1d4ed8 100%);
-        border-radius: 16px;
-        color: #ffffff;
-        margin-bottom: 1.6rem;
-        padding: 2rem 2.2rem;
-    }
-    .hero-eyebrow {
-        font-size: 0.74rem;
-        font-weight: 600;
-        letter-spacing: 0.12em;
-        opacity: 0.82;
-        text-transform: uppercase;
-    }
-    .hero h1 {
-        font-size: 2.15rem;
-        letter-spacing: -0.02em;
-        margin: 0.5rem 0 0.55rem;
-    }
-    .hero p {
-        margin: 0;
-        max-width: 62ch;
-        opacity: 0.92;
-    }
-    .team-name {
-        font-weight: 600;
-    }
-    .team-id {
-        color: #64748b;
-        font-size: 0.86rem;
-    }
-    [data-testid="stMetricValue"] {
-        font-size: 1.6rem;
-    }
-    [data-testid="stFileUploaderDropzone"] {
-        border-radius: 12px;
-    }
-</style>
-"""
-st.markdown(STYLES, unsafe_allow_html=True)
-
-
-def render_hero() -> None:
-    st.markdown(
-        """
-        <div class="hero">
-            <div class="hero-eyebrow">Project P12 · Google Cloud Vision</div>
-            <h1>Image Recognition</h1>
-            <p>Upload a photo to identify its content, locate objects, and extract
-            text in seconds.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _app_password() -> str | None:
-    try:
-        value = st.secrets.get("app_password")
-    except Exception:
-        return None
-    if value is None:
-        return None
-    value = str(value).strip()
-    return value or None
-
-
-def require_password() -> None:
-    password = _app_password()
-    if not password or st.session_state.get("authenticated"):
-        return
-
-    st.subheader("Sign in")
-    st.caption("This application is password protected.")
-    with st.form("login"):
-        entered = st.text_input(
-            "Password",
-            type="password",
-            placeholder="Password",
-            label_visibility="collapsed",
-        )
-        submitted = st.form_submit_button(
-            "Continue", type="primary", width="stretch"
-        )
-    if submitted:
-        if hmac.compare_digest(entered, password):
-            st.session_state["authenticated"] = True
-            st.rerun()
-        st.error("Incorrect password. Please try again.")
+try:
+    picture, content = prepare_image(data)
+except ValueError as exc:
+    st.error(str(exc))
     st.stop()
 
+key = hashlib.sha256(content).hexdigest()
+if st.session_state.get('result_key') != key:
+    st.session_state.pop('result', None)
+    st.session_state['result_key'] = key
 
-@st.cache_resource(show_spinner=False)
-def get_client():
-    try:
-        info = dict(st.secrets["gcp_service_account"])
-    except Exception:
-        info = None
-    return build_client(info)
+left, right = st.columns([1.4, 1], gap='medium')
+with left.container(border=True, key='image_panel'):
+    st.subheader('Image preview')
+    preview = st.empty()
+    preview.image(picture, width='stretch')
+    st.caption(f'{picture.width} × {picture.height} pixels · Processed in memory')
+with right.container(border=True, key='action_panel'):
+    st.subheader('2. Analyze the image')
+    st.write('Review the image before starting. Results will appear below.')
+    api_key = get_api_key()
+    if not api_key:
+        try:
+            api_key = str(st.secrets.get('GEMINI_API_KEY', '')).strip()
+        except FileNotFoundError:
+            api_key = ''
+    if not api_key:
+        st.warning('Image analysis is unavailable. Contact the app administrator.')
+    if st.button('Analyze image', type='primary', width='stretch', disabled=not api_key):
+        try:
+            with st.spinner('Analyzing image…'):
+                st.session_state['result'] = analyze_image(content, api_key)
+        except GeminiError as exc:
+            st.error(str(exc))
+    st.caption('Your image will be sent to Google Gemini. Usage charges may apply.')
 
-
-def get_client_or_error():
-    try:
-        return get_client(), None
-    except VisionClientError:
-        logger.exception("Could not initialize the Vision client")
-        return (
-            None,
-            "This application is not configured for image analysis yet. "
-            "Please contact the app owner.",
-        )
-    except Exception:
-        logger.exception("Unexpected client initialization error")
-        return (
-            None,
-            "The image analysis service is unavailable right now. "
-            "Please try again later.",
-        )
-
-
-def describe_analysis_error(exc: Exception) -> str:
-    message = str(exc).lower()
-    if "billing" in message:
-        return (
-            "Image analysis is unavailable because the Google Cloud billing "
-            "account for this project is not active. Please contact the app owner."
-        )
-    if "permission" in message or "forbidden" in message:
-        return (
-            "The image analysis service is not available for this project. "
-            "Please contact the app owner."
-        )
-    return "The image could not be analyzed right now. Please try again in a moment."
-
-
-def analyze_uploaded_image(client, file_bytes: bytes):
-    try:
-        return analyze_image(client, file_bytes, max_results=MAX_RESULTS), None
-    except VisionClientError:
-        logger.exception("The Vision API returned an error")
-        return None, "The image could not be analyzed. Please try again."
-    except GoogleAPIError as exc:
-        logger.exception("The Vision API request failed")
-        return None, describe_analysis_error(exc)
-    except Exception:
-        logger.exception("Unexpected error while analyzing an image")
-        return (
-            None,
-            "Something went wrong while analyzing the image. Please try again.",
-        )
-
-
-def render_empty_state() -> None:
-    st.caption("Upload a JPG, PNG, WEBP, BMP or GIF image up to 20 MB to get started.")
-    st.caption(
-        "Your image is sent to Google Cloud Vision for analysis. "
-        "This app does not store it."
-    )
-
-
-def render_results(result, image: Image.Image, file_stem: str) -> None:
+result = st.session_state.get('result')
+if result:
     st.divider()
-    top_label = max(result.labels, key=lambda item: item["score"], default=None)
-
-    first, second, third = st.columns(3)
-    first.metric("Labels", len(result.labels))
-    second.metric("Objects", len(result.objects))
-    third.metric("Words", len(result.words))
-
-    if top_label:
-        st.caption(
-            f"Top match: **{top_label['name']}** "
-            f"({top_label['score'] * 100:.1f}% confidence)"
+    st.subheader('3. Review results')
+    st.success('Analysis complete.')
+    with st.container(border=True, width=480):
+        slider_state = st.session_state.get('confidence_slider', {})
+        slider = confidence_slider(
+            key='confidence_slider',
+            data={'value': slider_state.get('value', 50)},
+            default={'value': 50},
+            on_value_change=lambda: None,
         )
-
-    labels_tab, objects_tab, text_tab = st.tabs(["Labels", "Objects", "Text"])
-
-    with labels_tab:
-        if result.labels:
-            labels_df = pd.DataFrame(
-                [
-                    {
-                        "Label": label["name"],
-                        "Confidence": round(label["score"] * 100, 1),
-                    }
-                    for label in result.labels
-                ]
-            ).sort_values("Confidence", ascending=False)
-            st.dataframe(
-                labels_df,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Label": st.column_config.TextColumn("Label"),
-                    "Confidence": st.column_config.ProgressColumn(
-                        "Confidence",
-                        min_value=0,
-                        max_value=100,
-                        format="%.1f%%",
-                    ),
-                },
-            )
-            st.caption(
-                "Confidence reflects how certain the model is that the label "
-                "applies to the image."
-            )
+    threshold = slider.value
+    labels = [x for x in result['labels'] if x['confidence'] >= threshold / 100]
+    objects = [x for x in result['objects'] if x['confidence'] >= threshold / 100]
+    overlay = picture.copy()
+    draw = ImageDraw.Draw(overlay)
+    for obj in objects:
+        points = [(int(v['x'] * overlay.width), int(v['y'] * overlay.height)) for v in obj['vertices']]
+        if points:
+            draw.line(points + [points[0]], fill='#39cba4', width=4)
+            draw.text(points[0], f"{obj['name']} {obj['confidence']:.0%}", fill='#117354', stroke_width=0)
+    preview.image(overlay, width='stretch')
+    a, b, c = st.columns(3)
+    a.metric('Visual labels', len(labels))
+    b.metric('Located objects', len(objects))
+    c.metric('Extracted characters', len(result['text']))
+    tab1, tab2, tab3 = st.tabs(['Visual labels', 'Objects', 'Extracted text'])
+    for tab, rows in [(tab1, labels), (tab2, objects)]:
+        with tab:
+            if not rows:
+                st.info('No results meet the selected confidence threshold.')
+            for row in rows:
+                st.write(f"**{row['name']}** · {row['confidence']:.1%}")
+                st.progress(max(0.0, min(1.0, row['confidence'])))
+    with tab3:
+        if result['text']:
+            st.text_area('Recognized text', result['text'], height=220)
+            if result['text_confidence'] is not None:
+                st.caption(f"Average word confidence: {result['text_confidence']:.1%}")
+            st.download_button('Download text', result['text'], 'extracted_text.txt', 'text/plain')
         else:
-            st.info("No labels were detected in this image.")
+            st.info('No readable text was detected.')
+    export = dict(result, mode='Gemini API', model=MODEL, minimum_confidence=threshold)
+    st.download_button('Download full report (JSON)', json.dumps(export, ensure_ascii=False, indent=2), 'vision_report.json', 'application/json')
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['type', 'name', 'confidence'])
+    for kind, rows in [('label', labels), ('object', objects)]:
+        for row in rows:
+            writer.writerow([kind, row['name'], row['confidence']])
+    st.download_button('Download filtered results (CSV)', output.getvalue().encode('utf-8-sig'), 'vision_results.csv', 'text/csv')
 
-    with objects_tab:
-        if result.objects:
-            st.image(
-                annotate_objects(image, result.objects),
-                caption="Detected objects",
-                width="stretch",
-            )
-            objects_df = pd.DataFrame(
-                [
-                    {
-                        "Object": obj["name"],
-                        "Confidence": round(obj["score"] * 100, 1),
-                    }
-                    for obj in result.objects
-                ]
-            ).sort_values("Confidence", ascending=False)
-            st.dataframe(
-                objects_df,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Object": st.column_config.TextColumn("Object"),
-                    "Confidence": st.column_config.ProgressColumn(
-                        "Confidence",
-                        min_value=0,
-                        max_value=100,
-                        format="%.1f%%",
-                    ),
-                },
-            )
-        else:
-            st.info("No objects were detected in this image.")
-
-    with text_tab:
-        if result.text.strip():
-            st.text_area(
-                "Extracted text",
-                value=result.text,
-                height=240,
-                label_visibility="collapsed",
-            )
-            st.caption(f"{len(result.words):,} words detected")
-            st.download_button(
-                "Download text",
-                data=result.text,
-                file_name=f"{file_stem or 'image'}-text.txt",
-                mime="text/plain",
-            )
-        else:
-            st.info("No text was detected in this image.")
-
-    with st.expander("Developer details"):
-        st.caption("Raw response returned by the Google Cloud Vision API.")
-        st.download_button(
-            "Download JSON",
-            data=json.dumps(result.raw, indent=2),
-            file_name=f"{file_stem or 'image'}-vision.json",
-            mime="application/json",
-        )
-        st.json(result.raw, expanded=False)
-
-
-def render_team() -> None:
-    st.divider()
-    st.caption("PROJECT TEAM")
-    columns = st.columns(3)
-    for column, (name, university_id) in zip(columns, TEAM):
-        with column:
-            st.markdown(
-                f'<div class="team-name">{name}</div>'
-                f'<div class="team-id">University ID: {university_id}</div>',
-                unsafe_allow_html=True,
-            )
-    st.caption("Project P12 · Image Recognition with Google Cloud Vision")
-
-
-def main() -> None:
-    render_hero()
-    require_password()
-
-    client, client_error = get_client_or_error()
-    if client_error:
-        st.error(client_error)
-        render_team()
-        return
-
-    uploaded = st.file_uploader(
-        "Upload an image",
-        type=("jpg", "jpeg", "png", "webp", "bmp", "gif"),
-        help=f"JPG, PNG, WEBP, BMP or GIF · up to {MAX_UPLOAD_MB} MB",
-    )
-
-    if uploaded is None:
-        for key in ("result", "analysis_error", "digest"):
-            st.session_state.pop(key, None)
-        render_empty_state()
-        render_team()
-        return
-
-    file_bytes = uploaded.getvalue()
-    digest = hashlib.sha256(file_bytes).hexdigest()
-
-    try:
-        image = Image.open(io.BytesIO(file_bytes))
-        image.load()
-    except (UnidentifiedImageError, OSError):
-        st.error(
-            "This file could not be opened as an image. "
-            "Please upload a JPG, PNG, WEBP, BMP or GIF file."
-        )
-        render_team()
-        return
-
-    st.image(image, caption=uploaded.name, width="stretch")
-
-    if st.session_state.get("digest") != digest:
-        for key in ("result", "analysis_error"):
-            st.session_state.pop(key, None)
-        st.session_state["digest"] = digest
-
-    if st.session_state.get("analysis_error"):
-        st.error(st.session_state["analysis_error"])
-        if st.button("Try again", type="primary", key="retry_analysis"):
-            st.session_state.pop("analysis_error", None)
-            st.rerun()
-
-    if "result" not in st.session_state and "analysis_error" not in st.session_state:
-        with st.spinner("Analyzing image..."):
-            result, error = analyze_uploaded_image(client, file_bytes)
-        if error:
-            st.session_state["analysis_error"] = error
-            st.rerun()
-        st.session_state["result"] = result
-
-    result = st.session_state.get("result")
-    if result is not None:
-        render_results(result, image, Path(uploaded.name).stem)
-
-    render_team()
-
-
-if __name__ == "__main__":
-    main()
+st.divider()
+st.caption('Project P12 · Asim bin Adel Al-Mutrafi & Abdul Hasib Zahid')

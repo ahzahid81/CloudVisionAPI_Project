@@ -1,147 +1,124 @@
-"""Google Cloud Vision API integration."""
+"""Image preparation and Google Cloud Vision integration."""
+import base64
+import io
+import json
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any
-
-from google.cloud import vision
-from google.oauth2 import service_account
-
-SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
-REQUIRED_SERVICE_ACCOUNT_FIELDS = ("type", "project_id", "private_key", "client_email")
-
-
-class VisionClientError(RuntimeError):
-    """Raised when the Vision client cannot be created or used."""
+MAX_BYTES = 10 * 1024 * 1024
+VISION_URL = 'https://vision.googleapis.com/v1/images:annotate'
+Image.MAX_IMAGE_PIXELS = 25_000_000
 
 
-@dataclass
-class AnalysisResult:
-    labels: list[dict[str, Any]]
-    objects: list[dict[str, Any]]
-    text: str
-    words: list[dict[str, Any]]
-    raw: dict[str, Any]
-
-
-def validate_service_account_info(info: Any) -> None:
-    if not isinstance(info, dict):
-        raise VisionClientError("The credentials must be provided as a TOML/JSON object.")
-    missing = [field for field in REQUIRED_SERVICE_ACCOUNT_FIELDS if not info.get(field)]
-    if missing:
-        raise VisionClientError(
-            "This does not look like a service account key. "
-            f"Missing required field(s): {', '.join(missing)}."
-        )
-    if info.get("type") != "service_account":
-        raise VisionClientError(
-            "Only service account keys are supported (the 'type' field must be "
-            "'service_account')."
-        )
-
-
-def build_client(service_account_info: dict[str, Any] | None = None) -> vision.ImageAnnotatorClient:
-    """Create a Vision client from an explicit key or the environment (ADC)."""
-    if service_account_info is not None:
-        validate_service_account_info(service_account_info)
-        try:
-            credentials = service_account.Credentials.from_service_account_info(
-                service_account_info, scopes=list(SCOPES)
-            )
-        except Exception as exc:
-            raise VisionClientError(
-                f"Could not create credentials from the service account key: {exc}"
-            ) from exc
-        try:
-            return vision.ImageAnnotatorClient(credentials=credentials)
-        except Exception as exc:
-            raise VisionClientError(f"Could not create the Vision client: {exc}") from exc
-
+def prepare_image(data):
+    if not data or len(data) > MAX_BYTES:
+        raise ValueError('Choose an image smaller than 10 MB.')
     try:
-        return vision.ImageAnnotatorClient()
-    except Exception as exc:
-        raise VisionClientError(
-            "No Google Cloud credentials were found. Add [gcp_service_account] to "
-            "Streamlit secrets or set GOOGLE_APPLICATION_CREDENTIALS."
-        ) from exc
+        with Image.open(io.BytesIO(data)) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source).convert('RGB')
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError('This image is invalid or too large to process.') from exc
+    image.thumbnail((4096, 4096))
+    output = io.BytesIO()
+    image.save(output, format='JPEG', quality=92)
+    return image, output.getvalue()
 
 
-def _response_to_dict(response: vision.AnnotateImageResponse) -> dict[str, Any]:
-    try:
-        return type(response).to_dict(response, preserving_proto_field_name=True)
-    except TypeError:
-        return type(response).to_dict(response)
-
-
-def analyze_image(
-    client: vision.ImageAnnotatorClient,
-    content: bytes,
-    max_results: int = 20,
-) -> AnalysisResult:
-    """Run label, object and text detection on one image."""
-    max_results = max(1, min(int(max_results), 100))
-    image = vision.Image(content=content)
-    request = vision.AnnotateImageRequest(
-        image=image,
-        features=[
-            vision.Feature(
-                type_=vision.Feature.Type.LABEL_DETECTION,
-                max_results=max_results,
-            ),
-            vision.Feature(
-                type_=vision.Feature.Type.OBJECT_LOCALIZATION,
-                max_results=max_results,
-            ),
-            vision.Feature(
-                type_=vision.Feature.Type.TEXT_DETECTION,
-                max_results=50,
-            ),
-        ],
-    )
-    response = client.annotate_image(request=request)
-
+def parse_response(response):
     if response.error.message:
-        raise VisionClientError(f"Vision API returned an error: {response.error.message}")
+        raise RuntimeError(response.error.message)
+    annotation = response.full_text_annotation
+    words = [word for page in annotation.pages for block in page.blocks
+             for paragraph in block.paragraphs for word in paragraph.words]
+    return {
+        'labels': [{'name': x.description, 'confidence': float(x.score)} for x in response.label_annotations],
+        'objects': [{'name': x.name, 'confidence': float(x.score),
+                     'vertices': [{'x': float(v.x), 'y': float(v.y)} for v in x.bounding_poly.normalized_vertices]}
+                    for x in response.localized_object_annotations],
+        'text': annotation.text,
+        'text_confidence': sum(w.confidence for w in words) / len(words) if words else None,
+    }
 
-    labels = [
-        {
-            "name": label.description,
-            "score": float(label.score or 0.0),
-            "topicality": float(label.topicality or 0.0),
-            "mid": label.mid,
-        }
-        for label in response.label_annotations
-        if label.description
-    ]
 
-    objects: list[dict[str, Any]] = []
-    for obj in response.localized_object_annotations:
-        box = [
-            (float(vertex.x), float(vertex.y))
-            for vertex in obj.bounding_poly.normalized_vertices
-        ]
-        objects.append(
-            {
-                "name": obj.name,
-                "score": float(obj.score or 0.0),
-                "box": box,
-                "mid": obj.mid,
-            }
-        )
+def analyze_image(content):
+    from google.cloud import vision
+    client = vision.ImageAnnotatorClient()
+    try:
+        response = client.annotate_image(request={
+            'image': {'content': content},
+            'features': [
+                {'type_': vision.Feature.Type.LABEL_DETECTION, 'max_results': 15},
+                {'type_': vision.Feature.Type.OBJECT_LOCALIZATION, 'max_results': 20},
+                {'type_': vision.Feature.Type.DOCUMENT_TEXT_DETECTION},
+            ],
+        }, timeout=60)
+        return parse_response(response)
+    finally:
+        client.transport.close()
 
-    text_annotations = list(response.text_annotations)
-    text = text_annotations[0].description if text_annotations else ""
-    words = [
-        {"text": annotation.description, "language": annotation.locale or ""}
-        for annotation in text_annotations[1:]
-        if annotation.description and annotation.description.strip()
-    ]
 
-    return AnalysisResult(
-        labels=labels,
-        objects=objects,
-        text=text or "",
-        words=words,
-        raw=_response_to_dict(response),
+class VisionError(Exception):
+    pass
+
+
+def analyze_image_rest(content, api_key):
+    from google.cloud import vision
+
+    body = {'requests': [{
+        'image': {'content': base64.b64encode(content).decode('ascii')},
+        'features': [
+            {'type': 'LABEL_DETECTION', 'maxResults': 15},
+            {'type': 'OBJECT_LOCALIZATION', 'maxResults': 20},
+            {'type': 'DOCUMENT_TEXT_DETECTION'},
+        ],
+    }]}
+    request = Request(
+        VISION_URL,
+        data=json.dumps(body).encode('utf-8'),
+        headers={'Content-Type': 'application/json', 'x-goog-api-key': api_key},
     )
+    try:
+        with urlopen(request, timeout=60) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        try:
+            details = json.load(exc).get('error', {}).get('details', [])
+        except (ValueError, OSError):
+            details = []
+        reason = next((item['reason'] for item in details
+                       if isinstance(item, dict) and isinstance(item.get('reason'), str)), '')
+        messages = {
+            'API_KEY_INVALID': 'The API key is invalid. Create a key in Google Cloud Console.',
+            'API_KEY_SERVICE_BLOCKED': 'Allow Cloud Vision API in the API key restrictions.',
+            'SERVICE_DISABLED': 'Enable Cloud Vision API in the project that owns this key.',
+            'BILLING_DISABLED': 'Link an active billing account to the project that owns this key.',
+        }
+        fallback = {
+            400: 'Cloud Vision rejected the request. Check the image and API key.',
+            401: 'Cloud Vision could not authenticate this API key.',
+            403: 'Cloud Vision denied access. Check API key restrictions, API activation, and project billing.',
+            429: 'Cloud Vision quota reached. Check your project quotas and try again.',
+        }
+        raise VisionError(messages.get(reason, fallback.get(exc.code, f'Cloud Vision request failed (HTTP {exc.code}).'))) from None
+    except (URLError, TimeoutError):
+        raise VisionError('Could not reach Cloud Vision. Check your connection and try again.') from None
+    except ValueError:
+        raise VisionError('Cloud Vision returned an unreadable response. Try again.') from None
+
+    try:
+        annotation = vision.AnnotateImageResponse.from_json(
+            json.dumps(payload['responses'][0]), ignore_unknown_fields=True
+        )
+        return parse_response(annotation)
+    except (IndexError, KeyError, TypeError, ValueError, RuntimeError):
+        raise VisionError('Cloud Vision could not analyze this image. Try another image.') from None
+
+
+def demo_result():
+    return {'labels': [{'name': 'Bicycle', 'confidence': .98}, {'name': 'Transport', 'confidence': .94}],
+            'objects': [{'name': 'Bicycle', 'confidence': .97,
+                         'vertices': [{'x': .12, 'y': .35}, {'x': .88, 'y': .35},
+                                      {'x': .88, 'y': .86}, {'x': .12, 'y': .86}]}],
+            'text': 'EXPLORE MORE\nVISION DEMO', 'text_confidence': .99}

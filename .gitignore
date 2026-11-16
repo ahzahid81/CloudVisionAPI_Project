@@ -1,27 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
 .venv/
-venv/
-env/
-
-# Environment & secrets
-.env
-.env.*
-!.env.example
-.streamlit/secrets.toml
-*.streamlit-secrets.toml
-
-# Google Cloud service account keys
-*service-account*.json
-*service_account*.json
-*credentials*.json
+__pycache__/
+credentials.json
 *-key.json
-key.json
-*.pem
-
-# OS / editors
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+.streamlit/secrets.toml
