@@ -39,9 +39,8 @@ p, li, label, span { color: var(--text); }
 
 /* Navbar */
 .navbar {
-    position: sticky;
-    top: 0.75rem;
-    z-index: 50;
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -121,6 +120,8 @@ p, li, label, span { color: var(--text); }
 }
 [data-testid="stFileUploaderDropzone"] * { color:#eaf2ff !important; }
 [data-testid="stFileUploader"] label, [data-testid="stFileUploader"] small { color:#dbe7f5 !important; }
+[data-testid="stFileUploader"], [data-testid="stFileUploaderDropzone"] { position: relative; z-index: 5; }
+[data-testid="stFileUploaderDropzone"] button, [data-testid="stFileUploaderDropzone"] input { pointer-events: auto !important; }
 div[data-baseweb="tab-list"] { gap:.35rem; background:rgba(255,255,255,0.05); padding:.3rem; border-radius:12px; }
 button[data-baseweb="tab"] { color:#d3deea !important; font-weight:600; }
 button[data-baseweb="tab"][aria-selected="true"] { color:#ffffff !important; background:rgba(59,130,246,0.18); border-radius:10px; }
@@ -171,8 +172,8 @@ textarea, input { color:#f8fafc !important; }
 
 /* Mobile responsiveness */
 @media (max-width: 900px) {
-    .block-container { padding-top: 3.5rem; padding-left:.75rem; padding-right:.75rem; }
-    .navbar { flex-direction: column; align-items: flex-start; gap:.65rem; position: static; }
+    .block-container { padding-top: 1.25rem; padding-left:.75rem; padding-right:.75rem; }
+    .navbar { flex-direction: column; align-items: flex-start; gap:.65rem; position: relative; z-index: 1; }
     .nav-links { justify-content:flex-start; width:100%; }
     .team-grid { grid-template-columns: 1fr; }
     .footer-meta { text-align:left; }
