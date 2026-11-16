@@ -8,29 +8,74 @@ from PIL import Image, ImageDraw
 from gemini_service import GeminiError, MODEL, analyze_image, get_api_key
 from vision_service import prepare_image
 
-st.set_page_config(page_title='Vision Studio', page_icon='◉', layout='wide')
+st.set_page_config(page_title='Vision Studio | Image Recognition', page_icon='🔎', layout='wide')
 st.markdown('''<style>
-.block-container {max-width:1050px;padding-top:3rem}
-h1 {letter-spacing:-.045em}
-.st-key-page_intro {
-    background:linear-gradient(115deg,#181510 25%,#32261a 73%,#59411f);
-    border:1px solid #745731;border-radius:20px;
-    padding:clamp(1rem,3vw,1.65rem);margin-bottom:.5rem
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.stApp {
+    background:
+        radial-gradient(900px 420px at 8% -10%, rgba(232,186,99,0.10), transparent 60%),
+        radial-gradient(800px 360px at 100% 0%, rgba(245,158,11,0.08), transparent 55%),
+        linear-gradient(180deg, #14110d 0%, #1a1612 100%);
 }
-.st-key-page_intro h1 {color:#f4cb7e}
+.block-container {max-width:1120px;padding-top:2rem;padding-bottom:3rem}
+h1 {letter-spacing:-.04em}
+.st-key-page_intro {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(125deg, #17130f 0%, #2a2118 55%, #4a3518 100%);
+    border: 1px solid rgba(232,186,99,0.28);
+    border-radius: 24px;
+    padding: clamp(1.2rem, 3vw, 2rem);
+    margin-bottom: .8rem;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+}
+.st-key-page_intro h1 {color:#f7d58b; margin-bottom: .25rem;}
+.eyebrow {
+    display:inline-block; font-size:.72rem; font-weight:700; letter-spacing:.14em;
+    text-transform:uppercase; color:#f4cb7e; background:rgba(244,203,126,0.12);
+    border:1px solid rgba(244,203,126,0.22); padding:.3rem .65rem; border-radius:999px;
+    margin-bottom:.55rem;
+}
+.hero-sub { color:#e8dcc7; font-size:1rem; max-width:70ch; line-height:1.55; }
+.hero-badges { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.85rem; }
+.hero-badge {
+    color:#f8e7c3; background:rgba(255,255,255,0.06); border:1px solid rgba(244,203,126,0.18);
+    padding:.32rem .65rem; border-radius:999px; font-size:.8rem; font-weight:500;
+}
 .st-key-image_panel,.st-key-action_panel {
-    background:#1b1814;border-color:#594628!important;border-radius:16px!important
+    background: rgba(27,24,20,0.88);
+    border: 1px solid rgba(232,186,99,0.22) !important;
+    border-radius: 18px !important;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.18);
 }
 [data-testid="stMetric"] {
-    background:#211b14;border:1px solid #594628;border-radius:14px;padding:1rem
+    background: linear-gradient(180deg, #211b14 0%, #1b1712 100%);
+    border: 1px solid rgba(232,186,99,0.22);
+    border-radius: 14px;
+    padding: 1rem;
 }
-[data-testid="stImage"] img {border-radius:12px}
-[data-testid="stFileUploaderDropzone"] {border:1px dashed #b08b49;border-radius:12px}
-button[kind="primary"] {background:#e8ba63;color:#21170a}
+[data-testid="stMetricLabel"] { color:#d8c6a9; font-weight:600; }
+[data-testid="stImage"] img {border-radius:14px; border:1px solid rgba(232,186,99,0.18);}
+[data-testid="stFileUploaderDropzone"] {
+    border: 1px dashed rgba(232,186,99,0.45);
+    border-radius: 14px;
+    background: rgba(255,255,255,0.02);
+}
+div[data-baseweb="tab-list"] { gap:.35rem; background:rgba(255,255,255,0.03); padding:.3rem; border-radius:12px; }
+button[kind="primary"] {background:#e8ba63;color:#21170a;font-weight:700;border:0}
 button[kind="primary"]:hover {background:#f6cf84;color:#21170a}
-button:focus-visible,a:focus-visible {
-    outline:3px solid #f4cb7e!important;outline-offset:3px
+button:focus-visible,a:focus-visible {outline:3px solid #f4cb7e!important;outline-offset:3px}
+.section-note { color:#cbb892; font-size:.92rem; margin-top:-.2rem; }
+.team-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.75rem; margin-top:.4rem; }
+.team-card {
+    background: rgba(27,24,20,0.8); border:1px solid rgba(232,186,99,0.18);
+    border-radius:14px; padding:.95rem 1rem; height:100%;
 }
+.team-name { color:#f7f0e3; font-weight:700; margin-bottom:.15rem; font-size:1rem; }
+.team-id { color:#cbb892; font-size:.88rem; }
+.footer-note { color:#b9a888; font-size:.85rem; margin-top:.7rem; }
+@media (max-width: 900px){ .team-grid{ grid-template-columns:1fr; } }
 </style>''', unsafe_allow_html=True)
 
 confidence_slider = st.components.v2.component(
@@ -84,8 +129,22 @@ confidence_slider = st.components.v2.component(
 )
 
 with st.container(key='page_intro'):
+    st.markdown('<div class="eyebrow">Project P12 · AI-Powered Image Recognition</div>', unsafe_allow_html=True)
     st.title('Vision Studio')
-    st.write('Find objects and extract text from an image.')
+    st.markdown(
+        '<div class="hero-sub">Premium image intelligence experience. Upload a photo to discover visual labels, '
+        'locate objects, and extract readable text with a clean, presentation-ready interface.</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="hero-badges">'
+        '<span class="hero-badge">Smart Labeling</span>'
+        '<span class="hero-badge">Object Detection</span>'
+        '<span class="hero-badge">OCR Extraction</span>'
+        '<span class="hero-badge">Instant Export</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 uploaded = st.file_uploader('1. Upload an image', type=['png', 'jpg', 'jpeg', 'webp'])
 if uploaded is None:
@@ -186,4 +245,13 @@ if result:
     st.download_button('Download filtered results (CSV)', output.getvalue().encode('utf-8-sig'), 'vision_results.csv', 'text/csv')
 
 st.divider()
-st.caption('Project P12 · Asim bin Adel Al-Mutrafi & Abdul Hasib Zahid')
+st.subheader('Project Team')
+st.markdown(
+    '''<div class="team-grid">
+        <div class="team-card"><div class="team-name">Asim bin Adel Al-Mutrafi</div><div class="team-id">University ID: 441006293</div></div>
+        <div class="team-card"><div class="team-name">Abdul Hasib Zahid</div><div class="team-id">University ID: 443058333</div></div>
+        <div class="team-card"><div class="team-name">MOHAMMAD TAKIUDDIN</div><div class="team-id">University ID: 441037573</div></div>
+    </div>
+    <div class="footer-note">Project P12 · Vision Studio Image Recognition Web Application</div>''',
+    unsafe_allow_html=True,
+)
